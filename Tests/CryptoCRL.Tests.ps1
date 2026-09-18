@@ -314,6 +314,39 @@ try {
     Move-IntoPlace -Staging $s -Target $t
     Eq (@(Get-ChildItem -LiteralPath $pub -Filter 'c.crl*' -File).Count) 1 'файлов c.crl*'
   }
+  # Соседний публикатор считает хэш опубликованного файла: Get-FileHash открывает
+  # его через OpenRead, без права на удаление, и ReplaceFile получает «файл занят».
+  It 'цель открыта на чтение и вскоре освобождается — замена проходит после ожидания' {
+    $s = Join-Path $pub 'd.crl.tmp'; $t = Join-Path $pub 'd.crl'
+    Set-Content -LiteralPath $t -Value 'old' -Encoding ASCII
+    Set-Content -LiteralPath $s -Value 'new' -Encoding ASCII
+    $opened = New-Object Threading.ManualResetEventSlim $false
+    $reader = [powershell]::Create().AddScript({
+        param($path, $signal)
+        $h = [IO.File]::OpenRead($path); $signal.Set()
+        Start-Sleep -Milliseconds 1500
+        $h.Dispose()
+      }).AddArgument($t).AddArgument($opened)
+    $job = $reader.BeginInvoke()
+    try {
+      True ($opened.Wait(10000)) 'читатель не открыл файл'
+      Move-IntoPlace -Staging $s -Target $t -Attempts 10 -DelaySec 1
+      Eq ((Get-Content -LiteralPath $t -Raw).Trim()) 'new' 'содержимое'
+      True (-not (Test-Path -LiteralPath $s)) 'временный файл должен исчезнуть'
+    } finally { [void]$reader.EndInvoke($job); $reader.Dispose() }
+  }
+  It 'цель занята дольше ожидания — ошибка «файл занят», прежний файл цел' {
+    $s = Join-Path $pub 'e.crl.tmp'; $t = Join-Path $pub 'e.crl'
+    Set-Content -LiteralPath $t -Value 'old' -Encoding ASCII
+    Set-Content -LiteralPath $s -Value 'new' -Encoding ASCII
+    $h = [IO.File]::OpenRead($t)
+    $err = $null
+    try { Move-IntoPlace -Staging $s -Target $t -Attempts 2 -DelaySec 0 } catch { $err = $_ } finally { $h.Dispose() }
+    True ($null -ne $err) 'ожидалось исключение'
+    $e = $err.Exception; while ($e.InnerException) { $e = $e.InnerException }
+    Eq $e.HResult -2147024864 'HResult (ERROR_SHARING_VIOLATION)'
+    Eq ((Get-Content -LiteralPath $t -Raw).Trim()) 'old' 'содержимое'
+  }
 
   # ================= Remove-StaleStaging =================
   # Уборка удаляет только старые временные файлы: свежий может принадлежать

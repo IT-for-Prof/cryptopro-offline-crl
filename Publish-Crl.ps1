@@ -393,17 +393,33 @@ function Move-IntoPlace {
     на чтение файле не срабатывает вовсе; он остаётся запасным путём для реализаций
     SMB без ReplaceFile.
     Третий аргумент — [NullString]::Value: $null PowerShell передаёт пустой строкой.
+
+    ReplaceFile требует права на удаление цели. Пока цель открыта на чтение без
+    этого права (соседний публикатор считает её хэш через Get-FileHash, Install-Crl
+    копирует), замена получает ERROR_SHARING_VIOLATION. Чтение заканчивается за
+    секунды, поэтому замена повторяется. Move-Item в этом случае не поможет: он
+    упрётся в ту же блокировку и ответит «файл уже существует».
   #>
   param(
     [Parameter(Mandatory=$true)][string]$Staging,
-    [Parameter(Mandatory=$true)][string]$Target
+    [Parameter(Mandatory=$true)][string]$Target,
+    [Parameter()][int]$Attempts = 15,
+    [Parameter()][int]$DelaySec = 2
   )
   if (Test-Path -LiteralPath $Target) {
-    try {
-      [IO.File]::Replace($Staging, $Target, [NullString]::Value)
-      return
-    } catch {
-      Write-Log -Level 'WARN' -Message ('{0}: неделимая замена не удалась ({1}), заменяю переносом.' -f (Split-Path -Leaf $Target), $_.Exception.Message)
+    for ($i = 1; ; $i++) {
+      try {
+        [IO.File]::Replace($Staging, $Target, [NullString]::Value)
+        return
+      } catch {
+        $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
+        if ($e.HResult -ne -2147024864) {   # не ERROR_SHARING_VIOLATION
+          Write-Log -Level 'WARN' -Message ('{0}: неделимая замена не удалась ({1}), заменяю переносом.' -f (Split-Path -Leaf $Target), $e.Message)
+          break
+        }
+        if ($i -ge $Attempts) { throw $e }
+        Start-Sleep -Seconds $DelaySec
+      }
     }
   }
   Move-Item -LiteralPath $Staging -Destination $Target -Force
