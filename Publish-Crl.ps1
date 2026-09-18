@@ -45,6 +45,13 @@ param(
 )
 
 Set-StrictMode -Version 2.0
+
+# Версия скрипта. Скрипты расходятся копированием по хостам, поэтому версия видна в журнале:
+# иначе на вопрос «какая версия на этом хосте» отвечать нечем.
+$script:ScriptVersion = '1.1.0'
+# Коды возврата csptest, означающие «извлекать нечего»: в контейнере нет сертификата либо нет такого ключа.
+$script:ScardNoSuchCertificate = -2146435028
+$script:NteKeysetNotDef = -2146893799
 $ErrorActionPreference = 'Stop'
 $InformationPreference = 'Continue'
 
@@ -218,10 +225,35 @@ function Get-ContainerName {
   return $name
 }
 
+function Test-NoCertificateCodes {
+  <#
+    Означают ли коды возврата csptest, что в контейнере нет сертификата.
+
+    Контейнер с одними ключами отвечает SCARD_E_NO_SUCH_CERTIFICATE (0x8010002C) по тому
+    типу ключа, который в нём есть, и NTE_KEYSET_NOT_DEF (0x80090019) по остальным (замер
+    18.09.2026). Поэтому «сертификата нет» — это когда все попытки вернули один из этих
+    двух кодов и хотя бы одна сказала про сертификат прямо. Любой другой код — «прочитать
+    не удалось»: заблокированный носитель не должен выглядеть пустым контейнером.
+  #>
+  param([Parameter(Mandatory=$true)][AllowEmptyCollection()][int[]]$Codes)
+  if ($Codes.Count -eq 0) { return $false }
+  foreach ($c in $Codes) {
+    if ($c -ne $script:ScardNoSuchCertificate -and $c -ne $script:NteKeysetNotDef) { return $false }
+  }
+  return ($Codes -contains $script:ScardNoSuchCertificate)
+}
+
 function Get-ContainerCertificate {
   <#
     Сертификат из контейнера, у которого рядом нет файла .cer. Внутри контейнера
     сертификат замаскирован, поэтому извлекается только через CSP (csptest -expcert).
+
+    Возвращает @{ Cert = <сертификат или $null>; NoCertificate = <$true, когда
+    сертификата в контейнере нет> }. Контейнер с одними ключами — обычное дело
+    (замер 18.09.2026: 6 из 10 контейнеров рабочего места), и неполнотой разбора
+    он не считается: csptest отвечает SCARD_E_NO_SUCH_CERTIFICATE по тому типу
+    ключа, который в контейнере есть, и NTE_KEYSET_NOT_DEF по остальным.
+    Любой другой код возврата и таймаут остаются «прочитать не удалось».
 
     Вызов ограничен 10 секундами: КриптоПро может неограниченно ждать носитель,
     и без предела один контейнер съел бы всё время задачи.
@@ -231,19 +263,24 @@ function Get-ContainerCertificate {
     [Parameter(Mandatory=$true)][string]$CspTest
   )
   $name = Get-ContainerName -Dir $Dir
-  if (-not $name) { return $null }
+  if (-not $name) { return @{ Cert = $null; NoCertificate = $false } }
   $tmp = Join-Path $env:TEMP ('crlcc-{0}.cer' -f [guid]::NewGuid().ToString('N'))
+  $codes = New-Object Collections.ArrayList
   try {
     foreach ($kt in 'exchange', 'signature') {
       $a = '-keyset -keytype {0} -container "{1}" -expcert {2}' -f $kt, ($name -replace '"', '\"'), $tmp
       $pr = Start-Process $CspTest -ArgumentList $a -NoNewWindow -PassThru `
               -RedirectStandardOutput ($tmp + '.out') -RedirectStandardError ($tmp + '.err')
-      if (-not $pr.WaitForExit(10000)) { try { $pr.Kill() } catch { } }
+      # Windows PowerShell 5.1 loses ExitCode of a -PassThru process whose handle was never read.
+      $null = $pr.Handle
+      if (-not $pr.WaitForExit(10000)) { try { $pr.Kill() } catch { }; [void]$codes.Add(-1); continue }
       if (Test-Path -LiteralPath $tmp) {
-        return (New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $tmp)
+        return @{ Cert = (New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $tmp); NoCertificate = $false }
       }
+      # An unknown exit code is a failure to read, never "no certificate".
+      if ($null -eq $pr.ExitCode) { [void]$codes.Add(-1) } else { [void]$codes.Add([int]$pr.ExitCode) }
     }
-    return $null
+    return @{ Cert = $null; NoCertificate = (Test-NoCertificateCodes -Codes ([int[]]$codes.ToArray())) }
   } finally {
     foreach ($f in @($tmp, ($tmp + '.out'), ($tmp + '.err'))) {
       if (Test-Path -LiteralPath $f) { try { [IO.File]::Delete($f) } catch { } }
@@ -319,11 +356,15 @@ function Get-CrlDistributionPoints {
     if ($null -eq $cspTest) { $script:NoCert++; continue }
     try {
       $x = Get-ContainerCertificate -Dir $d.FullName -CspTest $cspTest
-      if ($null -eq $x) {
-        $script:NoCert++
-        Write-Log -Level 'WARN' -Message ('{0}: сертификат из контейнера не извлечён — его точки распространения не найдены.' -f $d.Name)
+      if ($null -eq $x.Cert) {
+        if ($x.NoCertificate) {
+          Write-Log -Level 'INFO' -Message ('{0}: в контейнере только ключи, сертификата нет — разбирать нечего.' -f $d.Name)
+        } else {
+          $script:NoCert++
+          Write-Log -Level 'WARN' -Message ('{0}: сертификат из контейнера не извлечён — его точки распространения не найдены.' -f $d.Name)
+        }
       } else {
-        $urls += @(Get-CertificateCdp -Certificate $x -Label $d.Name)
+        $urls += @(Get-CertificateCdp -Certificate $x.Cert -Label $d.Name)
         $fromCont++
       }
     } catch {
@@ -519,7 +560,7 @@ function Remove-StaleStaging {
 
 $exitCode = 0
 try {
-  Write-Log -Level 'INFO' -Message ('Старт | Host={0} | RunAs={1}' -f $env:COMPUTERNAME, ([Security.Principal.WindowsIdentity]::GetCurrent()).Name)
+  Write-Log -Level 'INFO' -Message ('Старт | Версия={0} | Host={1} | RunAs={2}' -f $script:ScriptVersion, $env:COMPUTERNAME, ([Security.Principal.WindowsIdentity]::GetCurrent()).Name)
   Remove-OldLogs -LogDir $LogRoot -RetentionDays $LogRetentionDays
 
   foreach ($req in 'KeysRoot', 'CrlRoot') {

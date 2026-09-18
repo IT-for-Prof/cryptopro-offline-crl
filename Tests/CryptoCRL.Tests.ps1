@@ -43,7 +43,7 @@ function Get-FunctionSource {
 
 . ([scriptblock]::Create((Get-FunctionSource -Path (Join-Path $PSScriptRoot '..\Publish-Crl.ps1') `
         -Names 'Test-ServicePath', 'Test-DerContent', 'Move-IntoPlace', 'Remove-StaleStaging', 'Get-PublishExitCode',
-               'Get-CdpUrl', 'Group-CrlUrlByFile', 'Get-ContainerName', 'Move-RetiredCrl')))
+               'Get-CdpUrl', 'Group-CrlUrlByFile', 'Get-ContainerName', 'Move-RetiredCrl', 'Test-NoCertificateCodes')))
 . ([scriptblock]::Create((Get-FunctionSource -Path (Join-Path $PSScriptRoot '..\Install-Crl.ps1') `
         -Names 'Test-CrlAlreadyInstalled')))
 
@@ -441,6 +441,27 @@ try {
   It 'пустой набор известных списков при пустом каталоге — без исключения' {
     Move-RetiredCrl -Root (New-Pub 'empty') -Known @()
     True $true 'исключения быть не должно'
+  }
+
+  # ================= Test-NoCertificateCodes =================
+
+  Write-Host "`nTest-NoCertificateCodes" -ForegroundColor Cyan
+  $script:ScardNoSuchCertificate = -2146435028
+  $script:NteKeysetNotDef = -2146893799
+  It 'контейнер с одними ключами: нет сертификата и нет второго ключа' {
+    True (Test-NoCertificateCodes -Codes @(-2146435028, -2146893799)) 'должно считаться контейнером без сертификата'
+  }
+  It 'оба типа ключа отвечают «нет сертификата»' {
+    True (Test-NoCertificateCodes -Codes @(-2146435028, -2146435028)) 'должно считаться контейнером без сертификата'
+  }
+  It 'только «нет такого ключа» — про сертификат никто не сказал' {
+    True (-not (Test-NoCertificateCodes -Codes @(-2146893799, -2146893799))) 'не должно считаться контейнером без сертификата'
+  }
+  It 'заблокированный носитель пустым контейнером не выглядит' {
+    True (-not (Test-NoCertificateCodes -Codes @(-2146435028, 1))) 'посторонний код — прочитать не удалось'
+  }
+  It 'пустой список кодов ничего не утверждает' {
+    True (-not (Test-NoCertificateCodes -Codes @())) 'без кодов вывода нет'
   }
 
   # ================= Get-PublishExitCode =================

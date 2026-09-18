@@ -40,6 +40,10 @@ param(
 )
 
 Set-StrictMode -Version 2.0
+
+# Версия скрипта. Скрипты расходятся копированием по хостам, поэтому версия видна в журнале:
+# иначе на вопрос «какая версия на этом хосте» отвечать нечем.
+$script:ScriptVersion = '1.1.0'
 $ErrorActionPreference = 'Stop'
 $InformationPreference = 'Continue'
 
@@ -115,7 +119,7 @@ function Test-CrlAlreadyInstalled {
 
 $exitCode = 0
 try {
-  Write-Log -Level 'INFO' -Message ('Старт | Host={0} | RunAs={1}' -f $env:COMPUTERNAME, ([Security.Principal.WindowsIdentity]::GetCurrent()).Name)
+  Write-Log -Level 'INFO' -Message ('Старт | Версия={0} | Host={1} | RunAs={2}' -f $script:ScriptVersion, $env:COMPUTERNAME, ([Security.Principal.WindowsIdentity]::GetCurrent()).Name)
   Remove-OldLogs -LogDir $LogRoot -RetentionDays $LogRetentionDays
 
   if ([string]::IsNullOrWhiteSpace($CrlRoot)) {
