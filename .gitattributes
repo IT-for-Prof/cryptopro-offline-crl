@@ -1,0 +1,4 @@
+* text=auto
+# Windows PowerShell 5.1 runs these; keep CRLF in the working tree on every OS.
+*.ps1 text eol=crlf
+*.md text eol=lf

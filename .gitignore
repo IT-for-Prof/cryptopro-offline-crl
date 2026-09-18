@@ -1,0 +1,17 @@
+# Deny by default, allow by exception: a new file stays out of git until it is allowed here.
+# Each allowed directory needs its own "exclude everything, then allow" pair.
+# CryptoCRL.local.psd1 (site settings) is never allowed.
+
+# --- repository root
+/*
+!/.gitignore
+!/.gitattributes
+!/LICENSE
+!/README.md
+!/Publish-Crl.ps1
+!/Install-Crl.ps1
+!/Tests/
+
+# --- tests
+/Tests/*
+!/Tests/CryptoCRL.Tests.ps1
